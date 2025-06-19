@@ -32,7 +32,7 @@
     "@azure-rest/ai-inference": "^1.0.0-beta.6",
     "@azure/core-auth": "^1.9.0",
     "@azure/openai": "^2.0.0",
-    "@langchain/openai": "^0.5.13",
+    "@langchain/azure-openai": "^0.0.19",
     "cors": "^2.8.5",
     "dotenv": "^16.5.0",
     "express": "^5.1.0",
