@@ -1,58 +1,61 @@
+import { BufferMemory } from "langchain/memory";
+import { ChatMessageHistory } from "langchain/stores/message/in_memory";
 import express from "express";
 import cors from "cors";
 import bodyParser from "body-parser";
-import fs from "fs/promises"; // Use fs.promises for async file operations
+import fs from "fs/promises"; 
 import path from "path";
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import pdfParse from 'pdf-parse/lib/pdf-parse.js';
-import ModelClient, { isUnexpected } from "@azure-rest/ai-inference";
-import { AzureKeyCredential } from "@azure/core-auth";
-import 'dotenv/config'; // Ensure dotenv is configured to load .env files
+import { AzureChatOpenAI } from "@langchain/openai";
+import 'dotenv/config'; 
 
-// --- PDF and environment setup ---
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// Construct the pdfPath in a more straightforward way
+
 const pdfPath = path.join(__dirname, '..', 'data', 'employee_handbook.pdf');
 
-// Retrieve environment variables
+
 const token = process.env["AZURE_INFERENCE_SDK_KEY"];
 const endpoint = process.env["AZURE_INFERENCE_SDK_ENDPOINT"];
 const modelName = "gpt-4o"; // or your preferred model
 
-// Check if environment variables are set
+
 if (!token || !endpoint) {
   console.error("Error: AZURE_INFERENCE_SDK_KEY or AZURE_INFERENCE_SDK_ENDPOINT is not set in environment variables.");
-  // Exit the process or handle this more gracefully based on your application's needs
+  
   process.exit(1);
 }
 
-// Initialize the Azure OpenAI client
-const client = ModelClient(
-  endpoint,
-  new AzureKeyCredential(token),
-);
+
+const chatModel = new AzureChatOpenAI({
+  azureOpenAIApiKey: process.env.AZURE_INFERENCE_SDK_KEY,
+  azureOpenAIApiInstanceName: process.env.INSTANCE_NAME, // In target url: https://<INSTANCE_NAME>.services...
+  azureOpenAIApiDeploymentName: process.env.DEPLOYMENT_NAME, // i.e "gpt-4o"
+  azureOpenAIApiVersion: "2024-08-01-preview",
+  basePath: process.env.AZURE_INFERENCE_SDK_ENDPOINT, 
+  temperature: 1,
+  maxTokens: 4096,
+});
 
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-// --- PDF chunking helpers ---
+
 let pdfText = null;
 let pdfChunks = [];
 const CHUNK_SIZE = 2000;
 
-/**
- * Loads the PDF content and chunks it into smaller pieces.
- * Caches the result to avoid reprocessing on every request.
- */
+
 async function loadPDF() {
-  if (pdfText) return pdfText; // Return cached text if already loaded
+  if (pdfText) return pdfText; 
 
   try {
-    // Check if PDF file exists
+    
     await fs.access(pdfPath, fs.constants.F_OK);
   } catch (error) {
     console.error(`Error: PDF not found at ${pdfPath}`);
@@ -60,28 +63,28 @@ async function loadPDF() {
   }
 
   try {
-    const dataBuffer = await fs.readFile(pdfPath); // Use async readFile
+    const dataBuffer = await fs.readFile(pdfPath); 
     const data = await pdfParse(dataBuffer);
     pdfText = data.text;
 
     let currentChunk = "";
-    // Split by whitespace to process words
+    
     const words = pdfText.split(/\s+/);
 
     for (const word of words) {
-      // Check if adding the next word exceeds the chunk size
+      
       if ((currentChunk + (currentChunk ? " " : "") + word).length <= CHUNK_SIZE) {
         currentChunk += (currentChunk ? " " : "") + word;
       } else {
-        // If current chunk is not empty, push it
+        
         if (currentChunk) {
           pdfChunks.push(currentChunk);
         }
-        // Start a new chunk with the current word
+        
         currentChunk = word;
       }
     }
-    // Add the last chunk if it's not empty
+    
     if (currentChunk) {
       pdfChunks.push(currentChunk);
     }
@@ -94,23 +97,18 @@ async function loadPDF() {
   }
 }
 
-/**
- * Retrieves relevant content chunks from the PDF based on the query.
- * It scores chunks by the number of matching query terms.
- * @param {string} query - The user's query.
- * @returns {string[]} An array of relevant content chunks.
- */
+
 function retrieveRelevantContent(query) {
   if (!pdfChunks.length) {
     console.warn("PDF chunks not available for retrieval. Ensure PDF is loaded.");
     return [];
   }
 
-  // Pre-process query terms for better matching
+  
   const queryTerms = query.toLowerCase()
-    .split(/\s+/) // Split by whitespace
-    .filter(term => term.length > 2) // Filter out very short terms
-    .map(term => term.replace(/[.,?!;:()"']/g, "")); // Remove punctuation
+    .split(/\s+/) 
+    .filter(term => term.length > 2) 
+    .map(term => term.replace(/[.,?!;:()"']/g, "")); 
 
   if (queryTerms.length === 0) return [];
 
@@ -118,108 +116,100 @@ function retrieveRelevantContent(query) {
     const chunkLower = chunk.toLowerCase();
     let score = 0;
     for (const term of queryTerms) {
-      // Create a regex for each term to find all occurrences
-      const regex = new RegExp(term, 'gi'); // 'gi' for global, case-insensitive match
+      
+      const regex = new RegExp(term, 'gi'); 
       const matches = chunkLower.match(regex);
       if (matches) {
-        score += matches.length; // Add the count of matches to the score
+        score += matches.length; 
       }
     }
     return { chunk, score };
   });
 
-  // Sort by score in descending order and return top 3
+  
   return scoredChunks
-    .filter(item => item.score > 0) // Only include chunks with a score
+    .filter(item => item.score > 0) 
     .sort((a, b) => b.score - a.score)
-    .slice(0, 3) // Get top 3 most relevant chunks
-    .map(item => item.chunk); // Return only the chunk text
+    .slice(0, 3) 
+    .map(item => item.chunk); 
 }
 
-// --- RAG-enabled chat endpoint ---
+
 app.post("/chat", async (req, res) => {
   const userMessage = req.body.message;
-  // Default useRAG to true if not provided
   const useRAG = req.body.useRAG === undefined ? true : req.body.useRAG;
+  const sessionId = req.body.sessionId || "default";
 
-  let messages = [];
   let sources = [];
 
-  if (useRAG) {
-    const pdfLoadResult = await loadPDF(); // Ensure PDF is loaded
-    if (pdfLoadResult.startsWith("Error") || pdfLoadResult.startsWith("PDF not found")) {
-      // Handle cases where PDF couldn't be loaded
-      messages.push({
-        role: "system",
-        content: "You are a helpful assistant. I apologize, but I could not access the employee handbook to retrieve information at this time."
-      });
-    } else {
-      sources = retrieveRelevantContent(userMessage);
+  const memory = getSessionMemory(sessionId);
+  const memoryVars = await memory.loadMemoryVariables({});
 
-      if (sources.length > 0) {
-        // Construct the system message with retrieved sources
-        messages.push({
-          role: "system",
-          content: `You are a helpful assistant answering questions about the company based on its employee handbook.
-          Use ONLY the following information from the handbook to answer the user's question.
-          If you can't find relevant information in the provided context, state that clearly and politely, without making up information.
-          --- EMPLOYEE HANDBOOK EXCERPTS ---
-          ${sources.join('\n\n')}
-          --- END OF EXCERPTS ---`
-        });
-      } else {
-        // If no relevant sources found, inform the model
-        messages.push({
-          role: "system",
-          content: "You are a helpful assistant. No highly relevant information was found in the employee handbook for this specific question. Please answer generally or state you don't have enough information from the handbook."
-        });
-      }
-    }
-  } else {
-    // If RAG is disabled, provide a general system prompt
-    messages.push({
-      role: "system",
-      content: "You are a helpful assistant answering questions about the company."
-    });
+  if (useRAG) {
+    await loadPDF();
+    sources = retrieveRelevantContent(userMessage);
   }
 
-  // Add the user's message to the conversation
-  messages.push({ role: "user", content: userMessage });
+  // Prepare system prompt
+  const systemMessage = useRAG
+    ? {
+        role: "system",
+        content: sources.length > 0
+          ? `You are a helpful assistant for Contoso Electronics. You must ONLY use the information provided below to answer.
+
+--- EMPLOYEE HANDBOOK EXCERPTS ---
+${sources.join('\n\n')}
+--- END OF EXCERPTS ---`
+          : `You are a helpful assistant for Contoso Electronics. The excerpts do not contain relevant information for this question. Reply politely: "I'm sorry, I don't know. The employee handbook does not contain information about that."`,
+      }
+    : {
+        role: "system",
+        content: "You are a helpful and knowledgeable assistant. Answer the user's questions concisely and informatively.",
+      };
 
   try {
-    // Call the Azure OpenAI chat completions API
-    const response = await client.path("/chat/completions").post({
-      body: {
-        messages,
-        max_tokens: 1000,
-        temperature: 1,
-        top_p: 1,
-        model: modelName
-      }
-    });
-    if (isUnexpected(response)) throw new Error(response.body.error || "Model API error");
+    // Build final messages array
+    const messages = [
+      systemMessage,
+      ...(memoryVars.chat_history || []),
+      { role: "user", content: userMessage },
+    ];
 
-    // Add this check:
-    if (!response.body.choices || !response.body.choices[0]) {
-      console.error("Azure OpenAI response:", response.body);
-      throw new Error("No choices returned from the model.");
-    }
+    const response = await chatModel.invoke(messages);
 
-    res.json({
-      reply: response.body.choices[0].message.content,
-      sources: useRAG ? sources : []
-    });
+    await memory.saveContext({ input: userMessage }, { output: response.content });
+
+    res.json({ reply: response.content, sources });
   } catch (err) {
-    console.error("Error calling Azure OpenAI model:", err.message);
-    res.status(500).json({ error: "Model call failed", message: err.message });
+    console.error(err);
+    res.status(500).json({
+      error: "Model call failed",
+      message: err.message,
+      reply: "Sorry, I encountered an error. Please try again."
+    });
   }
 });
 
-// --- Start server ---
+
+// Store session histories, allowing you to maintain separate chat histories for different users or sessions.
+const sessionMemories = {};
+
+function getSessionMemory(sessionId) {
+  if (!sessionMemories[sessionId]) {
+    const history = new ChatMessageHistory();
+    sessionMemories[sessionId] = new BufferMemory({
+      chatHistory: history,
+      returnMessages: true,
+      memoryKey: "chat_history",
+    });
+  }
+  return sessionMemories[sessionId];
+}
+
+
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`AI API server running on port ${PORT}`);
-  // Attempt to load PDF on server startup to pre-cache
   loadPDF().then(() => {
     console.log("Initial PDF loading attempt complete.");
   }).catch(err => {
