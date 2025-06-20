@@ -1,0 +1,12 @@
+type: function
+id: tavily_search
+name: search_tavily
+description: Performs real-time web search using Tavily.
+parameters:
+  type: object
+  properties:
+    query:
+      type: string
+      description: Search query to send to Tavily.
+  required: [query]
+
