@@ -10,6 +10,7 @@ import { dirname } from 'path';
 import pdfParse from 'pdf-parse/lib/pdf-parse.js';
 import { AzureChatOpenAI } from "@langchain/openai";
 import 'dotenv/config'; 
+import axios from 'axios';
 
 
 const __filename = fileURLToPath(import.meta.url);
@@ -148,6 +149,11 @@ app.post("/chat", async (req, res) => {
   if (useRAG) {
     await loadPDF();
     sources = retrieveRelevantContent(userMessage);
+
+    const tavilySnippet = await queryTavily(userMessage);
+    if (tavilySnippet) {
+      sources.push(`(From Tavily Search)\n${tavilySnippet}`);
+    }
   }
 
   // Prepare system prompt
@@ -204,6 +210,25 @@ function getSessionMemory(sessionId) {
     });
   }
   return sessionMemories[sessionId];
+}
+
+// Helper to query Tavily web context
+async function queryTavily(query) {
+  try {
+    const res = await axios.post(
+      'https://api.tavily.com/search',
+      {
+        query,
+        api_key: process.env.TAVILY_API_KEY,
+        include_answer: true
+      },
+      { headers: { 'Content-Type': 'application/json' } }
+    );
+    return res.data.answer || null;
+  } catch (err) {
+    console.error("Tavily error:", err.message);
+    return null;
+  }
 }
 
 
