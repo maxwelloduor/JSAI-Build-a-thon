@@ -8,4 +8,4 @@ package-lock.json
 .env
 genaiscript.d.ts
 tsconfig.json
-jsconfig.json
+jsconfig.json.env
