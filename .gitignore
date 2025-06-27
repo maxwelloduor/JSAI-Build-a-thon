@@ -5,7 +5,7 @@ node_modules
 package-lock.json
 .vscode
 
-
+.env
 genaiscript.d.ts
 tsconfig.json
 jsconfig.json
